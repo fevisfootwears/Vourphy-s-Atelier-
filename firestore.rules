@@ -1,0 +1,120 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny Catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 3. Global Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn() && request.auth.token.email_verified == true; }
+    function isOwner(userId) { return isSignedIn() && request.auth.uid == userId; }
+    
+    // HARDENED ADMIN HELPER
+    // Bootstrapped Admin: fevisfootwears@gmail.com
+    function isAdmin() { 
+      return isSignedIn() && (
+        request.auth.token.email == 'fevisfootwears@gmail.com' ||
+        (isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)))
+      ); 
+    }
+    
+    function isValidId(id) { return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$'); }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // --- Entity Specific Validation ---
+
+    function isValidUser(data) {
+      return isValidId(data.userId) &&
+             data.email is string && data.email.size() <= 128 &&
+             data.role in ['customer', 'admin'] &&
+             data.createdAt == request.time &&
+             data.updatedAt == request.time;
+    }
+
+    function isValidProduct(data) {
+      return data.name is string && data.name.size() <= 200 &&
+             data.category is string && data.category.size() <= 100 &&
+             data.price is number && data.price >= 0 &&
+             data.image is string && data.image.size() <= 1200000;
+    }
+
+    function isValidOrder(data) {
+      return data.customerId == request.auth.uid &&
+             data.status in ['pending', 'processing', 'shipped', 'delivered', 'cancelled'] &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.createdAt == request.time;
+    }
+
+    function isValidBranding(data) {
+      return (data.url == null || (data.url is string && data.url.size() <= 1000000));
+    }
+
+    function isValidSiteAsset(data) {
+      return data.url is string && data.url.size() <= 1000000 &&
+             data.category in ['artisan', 'bespoke', 'journal', 'profile'];
+    }
+
+    // --- Collections ---
+
+    match /branding/{docId} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidBranding(incoming());
+    }
+
+    match /siteAssets/{assetId} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidSiteAsset(incoming());
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow create: if isValidId(userId) && isOwner(userId) && isValidUser(incoming()) && incoming().role == 'customer';
+      allow update: if isValidId(userId) && isOwner(userId) && 
+                      incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatarUrl', 'updatedAt']) &&
+                      incoming().updatedAt == request.time;
+    }
+
+    match /products/{productId} {
+      allow read: if true; 
+      allow create: if isValidId(productId) && isAdmin() && isValidProduct(incoming());
+      allow update: if isValidId(productId) && isAdmin() && isValidProduct(incoming());
+      allow delete: if isValidId(productId) && isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow list: if isSignedIn() && resource.data.customerId == request.auth.uid;
+      allow get: if isValidId(orderId) && (isOwner(existing().customerId) || isAdmin());
+      allow create: if isValidId(orderId) && isVerified() && isValidOrder(incoming());
+      allow update: if isValidId(orderId) && (
+        isAdmin() || (
+          isOwner(existing().customerId) && 
+          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+          existing().status == 'pending' &&
+          incoming().status == 'cancelled' &&
+          incoming().updatedAt == request.time
+        )
+      );
+    }
+
+    // Admins Collection (Read-only reference for rules)
+    match /admins/{adminId} {
+      allow read: if isSignedIn();
+    }
+
+    // Marketers Collection
+    match /marketers/{marketerId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && isOwner(marketerId);
+    }
+
+    // Referral Leads Collection
+    match /referralLeads/{leadId} {
+      allow create: if true;
+      allow read: if isAdmin();
+    }
+  }
+}
